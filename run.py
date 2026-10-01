@@ -4,6 +4,8 @@
   python run.py digest [--force]  скоринг Claude + дайджест (cron: раз в день)
   python run.py status            состояние источников и базы
   python run.py print-cron        строки crontab по настройкам из config.yaml
+  python run.py journal           пересобрать data/journal.md и journal.csv
+  python run.py patterns [--since 2023-01-01]  цена после событий разного типа vs обычный день
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from datetime import datetime, timedelta
 import alerts
 import digest
 import filter as heuristics
+import journal
 import scorer
 from core import (Http, RunLock, connect_db, health_fail, health_ok, iso, kv_get, kv_set, load_config, log,
                   now_utc, setup_logging, upsert_item, write_beacon, ROOT)
@@ -42,6 +45,18 @@ def collect(cfg: dict) -> None:
         conn.commit()
         health_ok(conn, name)
         log.info("%s: %d постов, новых %d", name, len(posts), new)
+
+    # Внимание всего Reddit: GME-сабы в топе r/all
+    rall_hits: list[dict] = []
+    if cfg["reddit"].get("r_all", {}).get("enabled"):
+        try:
+            hits = reddit.fetch_r_all(http, cfg["reddit"]["r_all"]["limit"])
+            tracked = {s["name"].lower() for s in cfg["reddit"]["subreddits"]}
+            rall_hits = journal.store_rall(conn, hits, tracked)
+            health_ok(conn, "reddit:r/all")
+            log.info("r/all: %d постов, из отслеживаемых сабов %d", len(hits), len(rall_hits))
+        except Exception as e:  # noqa: BLE001
+            health_fail(conn, "reddit:r/all", str(e))
 
     # Новости
     for feed_cfg in cfg["news"]["feeds"]:
@@ -80,13 +95,18 @@ def collect(cfg: dict) -> None:
     # Алерты
     alerts.check_sec(conn, cfg, new_sec)
     try:
+        if not conn.execute("SELECT 1 FROM prices LIMIT 1").fetchone():
+            journal.store_bars(conn, price.fetch_history(http, cfg["price"]["ticker"], "max"))
+            log.info("price: загружена вся история цен для дневника")
         move = price.fetch_day_move(http, cfg["price"]["ticker"])
+        journal.store_bars(conn, move["bars"])
         health_ok(conn, "price")
         log.info("price: %s %.2f (%+.2f%%)", move["ticker"], move["price"], move["change_pct"])
         alerts.check_price(conn, cfg, move)
     except Exception as e:  # noqa: BLE001
         health_fail(conn, "price", str(e))
     alerts.check_velocity(conn, cfg)
+    alerts.check_rall(conn, cfg, rall_hits)
     alerts.check_source_health(conn, cfg)
 
     conn.execute("DELETE FROM reddit_snapshots WHERE ts<?", (iso(now_utc() - timedelta(days=7)),))
@@ -154,9 +174,10 @@ def main() -> int:
         if stream:  # под pythonw потоков нет
             stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="GME-монитор")
-    ap.add_argument("command", choices=["collect", "digest", "status", "print-cron"])
+    ap.add_argument("command", choices=["collect", "digest", "status", "print-cron", "journal", "patterns"])
     ap.add_argument("--force", action="store_true", help="digest: отправить повторно за сегодня")
     ap.add_argument("--windows", action="store_true", help="print-cron: команды schtasks для Windows")
+    ap.add_argument("--since", help="patterns: начало периода, YYYY-MM-DD (по умолчанию 2021-01-01)")
     ap.add_argument("--config", help="путь к config.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -167,6 +188,13 @@ def main() -> int:
         return 0
     if args.command == "status":
         status(cfg)
+        return 0
+    if args.command == "journal":
+        journal.export(connect_db(cfg), cfg)
+        print("data/journal.md, data/journal.csv обновлены")
+        return 0
+    if args.command == "patterns":
+        print(journal.patterns(connect_db(cfg), cfg, args.since))
         return 0
 
     setup_logging(cfg, args.verbose)

@@ -70,7 +70,12 @@ reddit:
     - what are your moves
   # домены, которые считаются «медиа без ссылки» (мемы-картинки/видео)
   media_domains: [i.redd.it, v.redd.it, i.imgur.com, imgur.com, reddit.com/gallery]
-  velocity:
+  r_all:                         # пост GME-саба в топе r/all = аномальное внимание
+    enabled: true                # работает и в RSS-режиме (1 запрос за сбор)
+    limit: 100
+    alert_top_n: 100             # алерт, если пост на месте <= N
+    max_post_age_hours: 24
+  velocity:                      # точный апвот-темп — только в OAuth/JSON-режиме
     max_post_age_hours: 8        # темп считаем только для свежих постов
     min_upvotes: 300             # и только когда пост уже заметный
 

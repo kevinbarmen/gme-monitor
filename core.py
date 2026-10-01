@@ -104,6 +104,19 @@ CREATE TABLE IF NOT EXISTS http_cache (
     url TEXT PRIMARY KEY, etag TEXT, last_modified TEXT, body TEXT, fetched_at TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+-- дневник: цена, внимание Reddit, записи по дням
+CREATE TABLE IF NOT EXISTS prices (
+    date TEXT PRIMARY KEY, open REAL, high REAL, low REAL, close REAL, volume INTEGER
+);
+CREATE TABLE IF NOT EXISTS rall_hits (   -- посты отслеживаемых сабов в топ-100 r/all
+    post_id TEXT, ts TEXT, rank INTEGER, sub TEXT, title TEXT, url TEXT, PRIMARY KEY (post_id, ts)
+);
+CREATE TABLE IF NOT EXISTS journal (
+    date TEXT PRIMARY KEY,          -- локальная дата дайджеста
+    market_day TEXT, close REAL, change_pct REAL, volume INTEGER, vol_ratio REAL,
+    sec TEXT, top TEXT, rall TEXT,  -- JSON
+    reddit_n INTEGER, news_n INTEGER
+);
 """
 
 

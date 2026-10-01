@@ -88,6 +88,20 @@ def check_velocity(conn, cfg: dict) -> None:
         _send(conn, cfg, f"velocity:{r['id']}", text)
 
 
+# 3б. Внимание всего Reddit: пост отслеживаемого саба в топе r/all
+#     (замена апвот-темпа, когда Reddit доступен только через RSS)
+def check_rall(conn, cfg: dict, hits: list[dict]) -> None:
+    acfg = cfg["reddit"]["r_all"]
+    max_age = now_utc() - timedelta(hours=acfg["max_post_age_hours"])
+    for h in hits:
+        if h["rank"] >= acfg["alert_top_n"] or datetime.fromtimestamp(h["created_ts"], timezone.utc) < max_age:
+            continue
+        text = (f"🔥 <b>Пост из r/{esc(h['sub'])} на #{h['rank'] + 1} в r/all</b>\n"
+                f"{esc(h['title'])}\n{esc(h['url'])}\n"
+                f"<i>Сигнал внимания всего Reddit, не факт — содержание не проверено.</i>")
+        _send(conn, cfg, f"rall:{h['id']}", text)
+
+
 # Здоровье источников (не «алерт по данным», а сообщение о поломке)
 def check_source_health(conn, cfg: dict) -> None:
     limit = now_utc() - timedelta(hours=cfg["health"]["source_down_alert_hours"])

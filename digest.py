@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
+import journal
 from core import esc, iso, kv_get, kv_set, log, now_utc, send_telegram
 
 BIAS_ICON = {"бычий сабреддит": "🐂", "нейтральный": "⚖️", "официальный документ": "🏛"}
@@ -38,6 +39,14 @@ def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[str]]:
 
     today = datetime.now().strftime("%d.%m.%Y")
     parts = [f"📰 <b>GME дайджест — {today}</b>"]
+    p = journal.price_summary(conn)
+    if p:
+        vol = f", объём ×{p['vol_ratio']:.1f} к среднему" if p["vol_ratio"] else ""
+        parts.append(f"💵 GME {p['close']:.2f} ({p['change_pct']:+.1f}%) на закрытии {p['market_day']}{vol}")
+    rall = conn.execute("SELECT COUNT(DISTINCT post_id) n, MIN(rank) best FROM rall_hits WHERE ts>=?",
+                        (iso(now_utc() - timedelta(hours=24)),)).fetchone()
+    if rall["n"]:
+        parts.append(f"🔥 Внимание Reddit: {rall['n']} пост(ов) GME-сабов в топ-100 r/all (лучшее место #{rall['best'] + 1})")
     if scoring_error:
         parts.append(f"⚠ Скоринг Claude не сработал: <code>{esc(scoring_error[:300])}</code>")
 
@@ -81,6 +90,10 @@ def run(conn, cfg: dict, scoring_error: str | None) -> bool:
     conn.commit()
     kv_set(conn, "last_digest_date", datetime.now().date().isoformat())
     log.info("дайджест отправлен: %d материалов", len(ids))
+    try:
+        journal.write_entry(conn, cfg, now)
+    except Exception:  # noqa: BLE001 — дневник не должен ронять дайджест
+        log.exception("дневник: не удалось записать")
     return True
 
 

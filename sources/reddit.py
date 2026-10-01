@@ -187,3 +187,23 @@ def fetch_subreddit(http, sub_cfg: dict, cfg: dict) -> list[dict]:
     if errors and not posts:
         raise RuntimeError("; ".join(errors))
     return list(posts.values())
+
+
+def fetch_r_all(http, limit: int = 100) -> list[dict]:
+    """Топ r/all (hot) через RSS: [{rank, sub, id, title, url, created_ts}].
+    Пост GME-сабов здесь = внимание всего Reddit, а не только своего саба."""
+    import calendar
+    body, _ = http.get(f"{WWW}/r/all/.rss?limit={limit}", cache=False)
+    out = []
+    for rank, e in enumerate(feedparser.parse(body).entries):
+        tags = e.get("tags") or []
+        ts = e.get("published_parsed") or e.get("updated_parsed")
+        out.append({
+            "rank": rank,
+            "sub": tags[0]["term"] if tags else "",
+            "id": "reddit:" + (e.get("id") or "").removeprefix("t3_"),
+            "title": e.get("title", ""),
+            "url": e.get("link", ""),
+            "created_ts": calendar.timegm(ts) if ts else 0,
+        })
+    return out
