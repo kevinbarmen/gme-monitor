@@ -1,0 +1,13 @@
+# Heartbeat: одна строка статуса всех систем раз в сутки.
+# Новая система = новый файл-маячок + запись здесь. Маячок: unix time или ISO 8601.
+systems:
+  - name: CS2
+    beacon: ~/status/cs2.ts
+    max_age_hours: 2
+    ok_word: жива
+    label: последний цикл
+  - name: GME
+    beacon: ~/status/gme.ts
+    max_age_hours: 6
+    ok_word: жив
+    label: последний сбор

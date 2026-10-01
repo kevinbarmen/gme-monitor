@@ -1,0 +1,180 @@
+# GME-монитор — все настройки здесь. Ключи/токены — только в .env.
+# Новый источник того же типа = одна запись в соответствующем списке ниже.
+
+paths:
+  db: data/gme.db               # отдельная SQLite-база этого проекта
+  logs: data/logs
+  beacon: ~/status/gme.ts        # маячок для heartbeat.py
+  lock: data/run.lock
+
+http:
+  user_agent: "gme-monitor/0.1 (personal info monitor; python-requests)"
+  min_interval_sec: 2.0          # пауза между запросами к одному хосту (Reddit требует >=2)
+  timeout_sec: 20
+  hosts:                         # переопределения по хостам
+    www.reddit.com:
+      min_interval_sec: 7        # RSS/JSON без авторизации: ~1 запрос в несколько секунд
+    oauth.reddit.com:
+      min_interval_sec: 2
+    query1.finance.yahoo.com:    # Yahoo отвечает 429 на не-браузерный UA
+      user_agent: &browser "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
+    feeds.finance.yahoo.com:
+      user_agent: *browser
+
+telegram:
+  # токен и chat_id берутся из .env: GME_TG_BOT_TOKEN, GME_TG_CHAT_ID
+  dry_run_if_no_token: true      # без токена сообщения печатаются в консоль
+
+# ---------------- Источники ----------------
+
+reddit:
+  # режим выбирается сам: OAuth (если REDDIT_CLIENT_ID/SECRET в .env) → публичный JSON → RSS.
+  # В RSS нет апвотов: вместо min_upvotes берутся первые rss_top_n постов каждого эндпоинта,
+  # алерт по апвот-темпу не работает. Для полноценной работы нужен OAuth (см. README).
+  endpoints: [top_day, hot]      # top за сутки и hot
+  limit: 50
+  rss_top_n: 10
+  subreddits:
+    - name: Superstonk
+      bias: бычий сабреддит
+      min_upvotes: 200
+      velocity_ups_per_hour: 800   # порог «аномального» апвот-темпа для алерта
+    - name: GME
+      bias: бычий сабреддит
+      min_upvotes: 50
+      velocity_ups_per_hour: 300
+    - name: DeepFuckingValue
+      bias: бычий сабреддит
+      min_upvotes: 50
+      velocity_ups_per_hour: 300
+    - name: stocks               # нейтральный — обязателен, не удалять
+      bias: нейтральный
+      min_upvotes: 50
+      velocity_ups_per_hour: 300
+      search: "GME OR GameStop"   # общий саб — берём только посты по ключевым словам
+  # флеары мемов/шитпостов (сравнение без учёта регистра, по вхождению)
+  excluded_flairs:
+    - meme
+    - shitpost
+    - "🤡"
+    - "🦍 buckle up"
+    - humor
+    - "fun"
+    - "art"
+    - "cool"
+  # закреплённые/служебные посты по заголовку (в RSS нет флага stickied)
+  excluded_title_patterns:
+    - daily directory
+    - daily discussion
+    - weekly discussion
+    - what are your moves
+  # домены, которые считаются «медиа без ссылки» (мемы-картинки/видео)
+  media_domains: [i.redd.it, v.redd.it, i.imgur.com, imgur.com, reddit.com/gallery]
+  velocity:
+    max_post_age_hours: 8        # темп считаем только для свежих постов
+    min_upvotes: 300             # и только когда пост уже заметный
+
+news:
+  feeds:
+    - name: Google News
+      url: "https://news.google.com/rss/search?q=GameStop+OR+GME&hl=en-US&gl=US&ceid=US:en"
+      bias: нейтральный
+    - name: Yahoo Finance
+      url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GME&region=US&lang=en-US"
+      bias: нейтральный
+  title_similarity: 0.82         # порог схожести заголовков для дедупликации
+  dedup_window_days: 3
+  max_age_hours: 36              # старые новости из фида не берём
+  stop_words:                    # кликбейт / мусорные статьи (без учёта регистра)
+    - "price target"
+    - "stocks to buy"
+    - "stocks to sell"
+    - "should you buy"
+    - "is it time to buy"
+    - "better buy"
+    - "millionaire"
+    - "could make you"
+    - "top stock"
+    - "meme stocks to watch"
+    - "prediction:"
+    - "trending stock"
+    - "stock forecast"
+    - "why is gamestop stock"
+
+sec:
+  cik: "0001326380"              # GameStop Corp.
+  # SEC требует User-Agent с контактом — задаётся в .env: SEC_USER_AGENT
+  forms:                         # эти филинги всегда идут в дайджест
+    - 8-K
+    - 8-K/A
+    - 10-Q
+    - 10-K
+    - 10-K/A
+    - "4"
+    - SC 13D
+    - SC 13D/A
+    - SC 13G
+    - SC 13G/A
+    - SCHEDULE 13D
+    - SCHEDULE 13D/A
+    - SCHEDULE 13G
+    - SCHEDULE 13G/A
+  alert_forms:                   # эти — ещё и срочным алертом
+    - 8-K
+    - SC 13D
+    - SC 13D/A
+    - SCHEDULE 13D
+    - SCHEDULE 13D/A
+    - SC 13G
+    - SCHEDULE 13G
+  first_run_lookback_days: 3     # при первом запуске старые филинги не алертим
+
+price:
+  ticker: GME
+  alert_move_pct: 15             # ±% за день для срочного алерта
+
+# ---------------- Фильтр / скоринг / дайджест ----------------
+
+scoring:
+  model: claude-sonnet-5-5
+  effort: medium
+  max_tokens: 16000
+  use_fallbacks: true            # серверный fallback при отказе модели
+  max_items_per_batch: 60
+  text_chars_per_item: 1500      # обрезка текста поста для экономии токенов
+  min_score: 5                   # ниже — не попадает в дайджест
+  lookback_hours: 36
+  system_prompt: |
+    Ты — аналитик-фильтр информационного монитора по акции GameStop (GME).
+    Тебе дают пачку материалов (посты Reddit и новости). Для каждого оцени,
+    несёт ли он полезную информацию, по критериям:
+      (a) новая фактическая информация о компании / фундаментале;
+      (b) существенное событие (филинг, сделка, заявление руководства);
+      (c) качественный анализ со ссылками на источники;
+      (d) просто сентимент / хайп / мемы / пересказ известного — отбрасывается (keep=false, score<=3).
+    Оценка score 1-10: 10 — важный новый факт из первоисточника, 1 — шум.
+    Учитывай уклон источника: бычьи сабреддиты склонны к преувеличениям и
+    непроверенным теориям — требуй источников.
+    summary_ru — 2-3 предложения на русском, только факты и суть, без эмоций.
+    Никогда не давай рекомендаций купить/продать/держать и не прогнозируй цену.
+    Если несколько материалов описывают одно и то же событие, высокую оценку ставь
+    только самому информативному (лучше первоисточнику), остальным — keep=false.
+    Верни оценку для КАЖДОГО материала из входа, id копируй как есть.
+
+digest:
+  time: "09:50"                  # локальное время (print-cron); после сбора в 09:23, мимо CS2 Heartbeat 09:30
+  top_n: 5
+
+# ---------------- Здоровье источников ----------------
+
+health:
+  source_down_alert_hours: 24    # источник падает дольше — сообщение в TG
+
+# ---------------- Расписание (для команды print-cron) ----------------
+
+schedule:
+  # CS2 занимает :00 по чётным часам (full), :32 (top), :11/:41 (health), каждые 5 мин (hot)
+  collect_minute: 23             # сбор в нечётные часы в HH:23 (~8 мин, заканчивается до :32)
+  collect_start_hour: 1
+  collect_every_hours: 2
+  heartbeat_time: "10:07"
