@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from core import iso
+from core import PermanentError, iso
 
 # 8-K items → по-русски (для строки «что это значит»)
 EIGHT_K_ITEMS = {
@@ -56,7 +56,7 @@ def meaning(form: str, items: str = "") -> str:
 def fetch_filings(http, sec_cfg: dict) -> list[dict]:
     ua = os.getenv("SEC_USER_AGENT")
     if not ua:
-        raise RuntimeError("SEC_USER_AGENT не задан в .env (SEC требует контакт в User-Agent)")
+        raise PermanentError("SEC_USER_AGENT не задан в .env (SEC требует контакт в User-Agent)")
     cik = sec_cfg["cik"].zfill(10)
     data = http.get_json(f"https://data.sec.gov/submissions/CIK{cik}.json", headers={"User-Agent": ua})
     recent = data["filings"]["recent"]

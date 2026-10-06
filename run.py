@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import alerts
@@ -18,102 +20,139 @@ import digest
 import filter as heuristics
 import journal
 import scorer
-from core import (Http, RunLock, connect_db, health_fail, health_ok, iso, kv_get, kv_set, load_config, log,
+from core import (Http, PermanentError, RunLock, connect_db, health_fail, health_ok, iso, kv_get, kv_set,
+                  load_config, log, source_log,
                   now_utc, setup_logging, upsert_item, write_beacon, ROOT)
 from sources import news, price, reddit, sec
 
 
-def collect(cfg: dict) -> None:
-    conn = connect_db(cfg)
-    http = Http(cfg, conn)
+def _source_tasks(cfg: dict, conn, http, ctx: dict) -> list[tuple[str, Callable[[], str]]]:
+    """Каждый источник — независимая задача (имя, функция). Функция сама сохраняет данные,
+    возвращает строку для лога и бросает исключение при ошибке. Результаты для алертов — в ctx."""
     snap_ts = iso()
     snap_since = now_utc() - timedelta(hours=cfg["reddit"]["velocity"]["max_post_age_hours"] * 2)
+    tasks: list[tuple[str, Callable[[], str]]] = []
 
-    # Reddit
-    for sub_cfg in cfg["reddit"]["subreddits"]:
-        name = f"reddit:r/{sub_cfg['name']}"
-        try:
+    def reddit_task(sub_cfg: dict) -> Callable[[], str]:
+        def run() -> str:
             posts = reddit.fetch_subreddit(http, sub_cfg, cfg["reddit"])
-        except Exception as e:  # noqa: BLE001
-            health_fail(conn, name, str(e))
-            continue
-        new = sum(upsert_item(conn, p) for p in posts)
-        for p in posts:
-            if p["meta"]["ups"] is not None and datetime.fromisoformat(p["created_utc"]) >= snap_since:
-                conn.execute("INSERT OR IGNORE INTO reddit_snapshots(post_id,ts,ups) VALUES(?,?,?)",
-                             (p["id"], snap_ts, p["meta"]["ups"]))
-        conn.commit()
-        health_ok(conn, name)
-        log.info("%s: %d постов, новых %d", name, len(posts), new)
+            new = sum(upsert_item(conn, p) for p in posts)
+            for p in posts:
+                if p["meta"]["ups"] is not None and datetime.fromisoformat(p["created_utc"]) >= snap_since:
+                    conn.execute("INSERT OR IGNORE INTO reddit_snapshots(post_id,ts,ups) VALUES(?,?,?)",
+                                 (p["id"], snap_ts, p["meta"]["ups"]))
+            conn.commit()
+            return f"{len(posts)} постов, новых {new}"
+        return run
 
-    # Внимание всего Reddit: GME-сабы в топе r/all
-    rall_hits: list[dict] = []
-    if cfg["reddit"].get("r_all", {}).get("enabled"):
-        try:
-            hits = reddit.fetch_r_all(http, cfg["reddit"]["r_all"]["limit"])
-            tracked = {s["name"].lower() for s in cfg["reddit"]["subreddits"]}
-            rall_hits = journal.store_rall(conn, hits, tracked)
-            health_ok(conn, "reddit:r/all")
-            log.info("r/all: %d постов, из отслеживаемых сабов %d", len(hits), len(rall_hits))
-        except Exception as e:  # noqa: BLE001
-            health_fail(conn, "reddit:r/all", str(e))
-
-    # Новости
-    for feed_cfg in cfg["news"]["feeds"]:
-        name = f"news:{feed_cfg['name']}"
-        try:
+    def news_task(feed_cfg: dict) -> Callable[[], str]:
+        def run() -> str:
             items = news.fetch_feed(http, feed_cfg)
-        except Exception as e:  # noqa: BLE001
-            health_fail(conn, name, str(e))
-            continue
-        new = sum(upsert_item(conn, it) for it in items)
-        conn.commit()
-        health_ok(conn, name)
-        log.info("%s: %d записей, новых %d", name, len(items), new)
+            new = sum(upsert_item(conn, it) for it in items)
+            conn.commit()
+            return f"{len(items)} записей, новых {new}"
+        return run
 
-    # SEC
-    new_sec: list[str] = []
-    try:
+    def rall_task() -> str:
+        # внимание всего Reddit: GME-сабы в топе r/all
+        hits = reddit.fetch_r_all(http, cfg["reddit"]["r_all"]["limit"])
+        tracked = {s["name"].lower() for s in cfg["reddit"]["subreddits"]}
+        ctx["rall_hits"] = journal.store_rall(conn, hits, tracked)
+        return f"{len(hits)} постов, из отслеживаемых сабов {len(ctx['rall_hits'])}"
+
+    def sec_task() -> str:
         filings = sec.fetch_filings(http, cfg["sec"])
-        new_sec = [f["id"] for f in filings if upsert_item(conn, f)]
+        new = [f["id"] for f in filings if upsert_item(conn, f)]
         conn.commit()
-        health_ok(conn, "sec")
-        log.info("sec: %d филингов в выборке, новых %d", len(filings), len(new_sec))
         if not kv_get(conn, "sec_initialized"):
             # первый запуск: историю не алертим, в дайджест — только последние N дней
             cutoff = iso(now_utc() - timedelta(days=cfg["sec"]["first_run_lookback_days"]))
             conn.execute("UPDATE items SET digest_sent_at='baseline' WHERE kind='sec' AND created_utc<?", (cutoff,))
             conn.commit()
             kv_set(conn, "sec_initialized", iso())
-            log.info("sec: первый запуск — %d филингов записаны как база, алертов нет", len(new_sec))
-            new_sec = []
-    except Exception as e:  # noqa: BLE001
-        health_fail(conn, "sec", str(e))
+            return f"первый запуск — {len(new)} филингов записаны как база, алертов нет"
+        ctx["new_sec"].extend(new)
+        return f"{len(filings)} филингов в выборке, новых {len(new)}"
 
-    heuristics.run(conn, cfg)
-
-    # Алерты
-    alerts.check_sec(conn, cfg, new_sec)
-    try:
+    def price_task() -> str:
         if not conn.execute("SELECT 1 FROM prices LIMIT 1").fetchone():
             journal.store_bars(conn, price.fetch_history(http, cfg["price"]["ticker"], "max"))
             log.info("price: загружена вся история цен для дневника")
         move = price.fetch_day_move(http, cfg["price"]["ticker"])
         journal.store_bars(conn, move["bars"])
-        health_ok(conn, "price")
-        log.info("price: %s %.2f (%+.2f%%)", move["ticker"], move["price"], move["change_pct"])
-        alerts.check_price(conn, cfg, move)
-    except Exception as e:  # noqa: BLE001
-        health_fail(conn, "price", str(e))
+        ctx["move"] = move
+        return f"{move['ticker']} {move['price']:.2f} ({move['change_pct']:+.2f}%)"
+
+    for sub_cfg in cfg["reddit"]["subreddits"]:
+        tasks.append((f"reddit:r/{sub_cfg['name']}", reddit_task(sub_cfg)))
+    if cfg["reddit"].get("r_all", {}).get("enabled"):
+        tasks.append(("reddit:r/all", rall_task))
+    for feed_cfg in cfg["news"]["feeds"]:
+        tasks.append((f"news:{feed_cfg['name']}", news_task(feed_cfg)))
+    tasks.append(("sec", sec_task))
+    tasks.append(("price", price_task))
+    return tasks
+
+
+def _filter_and_alert(conn, cfg: dict, ctx: dict) -> None:
+    """Фильтр + алерты по тому, что уже собрано. Безопасно вызывать повторно:
+    каждый алерт отправляется один раз (таблица alerts)."""
+    heuristics.run(conn, cfg)
+    alerts.check_sec(conn, cfg, ctx["new_sec"])
+    if ctx["move"]:
+        alerts.check_price(conn, cfg, ctx["move"])
     alerts.check_velocity(conn, cfg)
-    alerts.check_rall(conn, cfg, rall_hits)
+    alerts.check_rall(conn, cfg, ctx["rall_hits"])
+
+
+def collect(cfg: dict) -> None:
+    """Сбор по всем источникам. Источники независимы: упавшие повторяются раундами
+    (30с → 2мин → 10мин по умолчанию), остальные в это время уже обработаны и
+    алерты по ним отправлены. После последней попытки источник помечается недоступным."""
+    conn = connect_db(cfg)
+    http = Http(cfg, conn)
+    ctx: dict = {"new_sec": [], "rall_hits": [], "move": None}
+    pending = _source_tasks(cfg, conn, http, ctx)
+    delays = [0, *cfg["health"]["retry_delays_sec"]]
+    errors: dict[str, str] = {}
+
+    for attempt, delay in enumerate(delays, 1):
+        if delay:
+            log.info("повтор через %d с (попытка %d/%d): %s", delay, attempt, len(delays),
+                     ", ".join(name for name, _ in pending))
+            time.sleep(delay)
+        failed, any_ok = [], False
+        for name, task in pending:
+            try:
+                summary = task()
+            except PermanentError as e:  # ошибка настройки — повтор не поможет
+                errors[name] = str(e)
+                health_fail(conn, name, str(e))
+                continue
+            except Exception as e:  # noqa: BLE001 — любая ошибка источника
+                errors[name] = str(e)
+                failed.append((name, task))
+                source_log.warning("%s: попытка %d/%d не удалась: %s", name, attempt, len(delays), e)
+                continue
+            health_ok(conn, name)
+            any_ok = True
+            log.info("%s: %s%s", name, summary, f" (с {attempt}-й попытки)" if attempt > 1 else "")
+        if any_ok or attempt == 1:
+            _filter_and_alert(conn, cfg, ctx)
+        pending = failed
+        if not pending:
+            break
+
+    for name, _ in pending:  # исчерпали повторы
+        health_fail(conn, name, errors[name])
     alerts.check_source_health(conn, cfg)
 
     conn.execute("DELETE FROM reddit_snapshots WHERE ts<?", (iso(now_utc() - timedelta(days=7)),))
     conn.commit()
     kv_set(conn, "last_collect", iso())
     write_beacon(cfg)
-    log.info("сбор завершён")
+    down = conn.execute("SELECT COUNT(*) n FROM source_health WHERE fail_since IS NOT NULL").fetchone()["n"]
+    log.info("сбор завершён%s", f", недоступных источников: {down}" if down else "")
 
 
 def run_digest(cfg: dict, force: bool) -> None:
@@ -199,7 +238,8 @@ def main() -> int:
 
     setup_logging(cfg, args.verbose)
     try:
-        with RunLock(cfg):
+        # дайджест ждёт, если сбор ещё повторяет упавшие источники
+        with RunLock(cfg, wait_sec=1500 if args.command == "digest" else 0):
             if args.command == "collect":
                 collect(cfg)
             else:

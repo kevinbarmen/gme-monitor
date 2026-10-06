@@ -187,6 +187,10 @@ def mark_alert(conn, key: str, text: str) -> None:
 
 # ---------------- source health ----------------
 
+class PermanentError(Exception):
+    """Ошибка настройки источника (нет ключа и т.п.) — повторять бессмысленно."""
+
+
 def health_ok(conn, source: str) -> None:
     conn.execute(
         "INSERT INTO source_health(source,last_ok,fail_since,down_alert_sent) VALUES(?,?,NULL,0) "
@@ -347,16 +351,26 @@ def write_beacon(cfg: dict) -> None:
 class RunLock:
     """Не даём двум запускам (cron + ручной) работать одновременно."""
 
-    def __init__(self, cfg: dict, stale_after_sec: int = 3600):
+    def __init__(self, cfg: dict, stale_after_sec: int = 3600, wait_sec: int = 0):
         self.path = resolve_path(cfg["paths"]["lock"])
         self.stale = stale_after_sec
+        self.wait = wait_sec  # сколько ждать освобождения, прежде чем сдаться
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists() and time.time() - self.path.stat().st_mtime < self.stale:
+        deadline = time.time() + self.wait
+        while self._held() and time.time() < deadline:
+            time.sleep(10)
+        if self._held():
             raise RuntimeError(f"уже запущено (лок {self.path}); если это не так — удалите файл")
         self.path.write_text(str(os.getpid()))
         return self
+
+    def _held(self) -> bool:
+        try:
+            return time.time() - self.path.stat().st_mtime < self.stale
+        except FileNotFoundError:
+            return False
 
     def __exit__(self, *exc):
         self.path.unlink(missing_ok=True)
