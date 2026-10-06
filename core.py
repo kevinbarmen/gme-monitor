@@ -104,6 +104,12 @@ CREATE TABLE IF NOT EXISTS http_cache (
     url TEXT PRIMARY KEY, etag TEXT, last_modified TEXT, body TEXT, fetched_at TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS scoring_runs (
+    ts TEXT PRIMARY KEY, prompt_version TEXT, model TEXT, n_items INTEGER, n_valid INTEGER,
+    n_invalid INTEGER,              -- невалидных ответов в первом запросе
+    n_unscored INTEGER,             -- осталось «не оценён» после повтора
+    n_injection INTEGER, input_tokens INTEGER, output_tokens INTEGER
+);
 -- дневник: цена, внимание Reddit, записи по дням
 CREATE TABLE IF NOT EXISTS prices (
     date TEXT PRIMARY KEY, open REAL, high REAL, low REAL, close REAL, volume INTEGER
@@ -120,12 +126,25 @@ CREATE TABLE IF NOT EXISTS journal (
 """
 
 
+# колонки items, добавленные после первого релиза
+MIGRATIONS = {
+    "score_status": "TEXT",     # ok | unscored (невалидный ответ модели — значения не выдумываются)
+    "injection": "INTEGER",     # модель заметила попытку prompt injection
+    "prompt_version": "TEXT",   # хэш prompts/scorer.md, которым оценён материал
+}
+
+
 def connect_db(cfg: dict) -> sqlite3.Connection:
     path = resolve_path(cfg["paths"]["db"])
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(items)")}
+    for col, decl in MIGRATIONS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE items ADD COLUMN {col} {decl}")
+    conn.commit()
     return conn
 
 

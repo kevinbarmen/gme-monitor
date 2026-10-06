@@ -14,6 +14,23 @@ def _line_bias(bias: str) -> str:
     return f"{BIAS_ICON.get(bias, '•')} {esc(bias)}" if bias else ""
 
 
+def service_notes(conn) -> list[str]:
+    """Служебные строки суточной сводки: качество ответов модели и недоступные источники."""
+    notes = []
+    s = conn.execute(
+        "SELECT COALESCE(SUM(n_invalid),0) inv, COALESCE(SUM(n_unscored),0) uns, COALESCE(SUM(n_injection),0) inj "
+        "FROM scoring_runs WHERE ts>=?", (iso(now_utc() - timedelta(hours=24)),)).fetchone()
+    if s["inv"] or s["uns"] or s["inj"]:
+        notes.append(f"🧪 Скоринг за сутки: невалидных ответов модели {s['inv']}, не оценено {s['uns']}, "
+                     f"попыток инъекции {s['inj']}")
+    down = conn.execute("SELECT source, fail_since FROM source_health WHERE fail_since IS NOT NULL "
+                        "ORDER BY source").fetchall()
+    if down:
+        notes.append("🔧 Источники недоступны: " + ", ".join(
+            f"{esc(r['source'])} (с {esc(r['fail_since'][5:16].replace('T', ' '))} UTC)" for r in down))
+    return notes
+
+
 def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[str]]:
     dcfg, scfg = cfg["digest"], cfg["scoring"]
     since = iso(now_utc() - timedelta(hours=scfg["lookback_hours"]))
@@ -49,6 +66,7 @@ def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[str]]:
         parts.append(f"🔥 Внимание Reddit: {rall['n']} пост(ов) GME-сабов в топ-100 r/all (лучшее место #{rall['best'] + 1})")
     if scoring_error:
         parts.append(f"⚠ Скоринг Claude не сработал: <code>{esc(scoring_error[:300])}</code>")
+    parts.extend(service_notes(conn))
 
     if filings:
         lines = ["🏛 <b>Новые SEC-филинги</b>"]
@@ -72,7 +90,8 @@ def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[str]]:
                      f"{esc(r['url'])}")
 
     if not top and not fallback and not filings:
-        return "🤫 <b>GME: тишина</b> — 0 материалов прошло порог за сутки.", []
+        parts[0] = f"🤫 <b>GME: тишина — {today}</b>\n0 материалов прошло порог за сутки."
+        return "\n\n".join(parts), []
     if not top and not fallback:
         parts.append("Из Reddit/новостей 0 материалов прошло порог.")
 
