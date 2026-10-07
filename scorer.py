@@ -14,7 +14,7 @@ from datetime import timedelta
 
 import anthropic
 
-from core import ROOT, iso, log, now_utc, resolve_path
+from core import ROOT, iso, log, now_utc, record_usage, resolve_path, tokens_today
 
 CATEGORIES = ["фундаментал", "событие", "заявление руководства", "анализ", "новости рынка", "хайп"]
 
@@ -184,37 +184,61 @@ def _one_pass(client, scfg: dict, system: str, items: list[dict]) -> tuple[dict,
     return valid, invalid, resp.usage
 
 
-def score_items(cfg: dict, items: list[dict]) -> tuple[dict[str, dict], dict, str | None]:
+BUDGET_PREFIX = "бюджет токенов"  # по этому префиксу ошибки run.py шлёт алерт о бюджете
+
+
+def budget_error(conn, cfg: dict) -> str | None:
+    """Сообщение, если суточный бюджет токенов исчерпан; иначе None."""
+    limit = cfg["budget"]["max_tokens_per_day"]
+    used = tokens_today(conn)
+    if used >= limit:
+        return f"{BUDGET_PREFIX} на сегодня исчерпан: {used} из {limit}"
+    return None
+
+
+def score_items(cfg: dict, items: list[dict], conn=None,
+                purpose: str = "digest") -> tuple[dict[str, dict], dict, str | None]:
     """Скорит список материалов (dict с id/kind/source/bias/title/text/meta).
-    Возвращает (валидные результаты по id, статистика, ошибка API или None).
-    Материалы, которых нет в результатах, — «не оценены»."""
+    Возвращает (валидные результаты по id, статистика, ошибка или None).
+    Материалы, которых нет в результатах, — «не оценены».
+    С conn каждый запрос пишется в таблицу usage и проверяется суточный бюджет токенов."""
     scfg = cfg["scoring"]
     system, version = load_prompt(cfg)
     stats = {"prompt_version": version, "model": scfg["model"], "n_items": len(items), "n_valid": 0,
              "n_invalid": 0, "n_unscored": 0, "input_tokens": 0, "output_tokens": 0, "invalid_reasons": {}}
+    if conn is not None and (err := budget_error(conn, cfg)):
+        return {}, stats, err
     if not prompt_was_tested(version, scfg["model"]):
         log.warning("скоринг: промпт %s с моделью %s не проходил тест на инъекцию — "
                     "запустите evals/injection_test.py", version, scfg["model"])
     log.info("скоринг: промпт %s, модель %s, материалов %d", version, scfg["model"], len(items))
 
-    try:
-        client = anthropic.Anthropic()
-        valid, invalid, usage = _one_pass(client, scfg, system, items)
+    def spend(usage) -> None:
         stats["input_tokens"] += usage.input_tokens
         stats["output_tokens"] += usage.output_tokens
+        if conn is not None:
+            record_usage(conn, cfg, purpose, scfg["model"], version, usage.input_tokens, usage.output_tokens)
+
+    try:
+        client = anthropic.Anthropic(timeout=cfg["budget"]["request_timeout_sec"])
+        valid, invalid, usage = _one_pass(client, scfg, system, items)
+        spend(usage)
         stats["n_invalid"] = len(invalid)
         stats["invalid_reasons"] = dict(invalid)
         if invalid:
             for i, reason in invalid.items():
                 log.warning("скоринг: невалидный ответ по %s: %s", i, reason)
-            log.info("скоринг: повторный запрос по %d невалидным", len(invalid))
-            again, still, usage = _one_pass(client, scfg, system, [it for it in items if it["id"] in invalid])
-            stats["input_tokens"] += usage.input_tokens
-            stats["output_tokens"] += usage.output_tokens
-            valid.update(again)
-            for i, reason in still.items():
-                log.warning("скоринг: %s не оценён после повтора: %s", i, reason)
-            stats["n_unscored"] = len(still)
+            if conn is not None and (err := budget_error(conn, cfg)):
+                log.warning("скоринг: повтор по %d невалидным пропущен — %s", len(invalid), err)
+                stats["n_unscored"] = len(invalid)
+            else:
+                log.info("скоринг: повторный запрос по %d невалидным", len(invalid))
+                again, still, usage = _one_pass(client, scfg, system, [it for it in items if it["id"] in invalid])
+                spend(usage)
+                valid.update(again)
+                for i, reason in still.items():
+                    log.warning("скоринг: %s не оценён после повтора: %s", i, reason)
+                stats["n_unscored"] = len(still)
     except anthropic.APIConnectionError as e:
         return {}, stats, f"Claude API недоступен: {e}"
     except anthropic.APIStatusError as e:
@@ -245,7 +269,7 @@ def run(conn, cfg: dict) -> tuple[int, str | None]:
         return 0, None
     items = [{"id": r["id"], "kind": r["kind"], "source": r["source"], "bias": r["bias"], "title": r["title"],
               "text": r["text"], "meta": json.loads(r["meta"] or "{}")} for r in rows]
-    valid, stats, err = score_items(cfg, items)
+    valid, stats, err = score_items(cfg, items, conn=conn, purpose="digest")
     if err:
         return 0, err
 

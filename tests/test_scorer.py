@@ -46,7 +46,7 @@ class FakeClient:
 
 def with_client(replies: list) -> FakeClient:
     client = FakeClient(replies)
-    anthropic.Anthropic = lambda: client
+    anthropic.Anthropic = lambda **kw: client
     return client
 
 

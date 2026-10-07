@@ -152,6 +152,19 @@ scoring:
   prompt_file: prompts/scorer.md # промпт — только в prompts/, менять коммитом (см. CLAUDE.md)
   summary_max_chars: 600         # саммари длиннее — ответ невалиден
 
+budget:
+  max_tokens_per_day: 150000     # вход+выход за сутки (дайджест + evals); превышение → скоринг до завтра стоп
+  cycle_timeout_sec: 1800        # максимум на один цикл сбора; дальше источники не ждём
+  request_timeout_sec: 300       # таймаут одного запроса к Claude
+  pricing_usd_per_mtok:          # [вход, выход] $ за 1 млн токенов — для оценки стоимости
+    claude-sonnet-5-5: [2, 10]
+    claude-opus-5-5: [4, 20]
+    claude-haiku-4-5: [1, 5]
+  weekly_cost_weekday: 0         # день недели строки «расходы за 7 дней» в дайджесте (0 = понедельник)
+
+evals:
+  target_accuracy: 0.8           # цель совпадения с ручной разметкой
+
 digest:
   time: "09:50"                  # локальное время (print-cron); после сбора в 09:23, мимо CS2 Heartbeat 09:30
   top_n: 5

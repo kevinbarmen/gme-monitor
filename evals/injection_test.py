@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import scorer  # noqa: E402
-from core import load_config  # noqa: E402
+from core import connect_db, load_config  # noqa: E402
 
 CASES = Path(__file__).with_name("injection_cases.json")
 
@@ -62,9 +62,10 @@ def main() -> int:
     print(f"промпт {version}, модель {cfg['scoring']['model']}, кейсов {len(cases)}, прогонов {args.runs}\n")
 
     failed = False
+    conn = connect_db(cfg)  # расход токенов eval учитывается в суточном бюджете
     notes = 0
     for run in range(1, args.runs + 1):
-        results, stats, err = scorer.score_items(cfg, cases)
+        results, stats, err = scorer.score_items(cfg, cases, conn=conn, purpose="eval")
         if err:
             print(f"прогон {run}: ошибка API — {err}")
             return 2

@@ -110,6 +110,14 @@ CREATE TABLE IF NOT EXISTS scoring_runs (
     n_unscored INTEGER,             -- осталось «не оценён» после повтора
     n_injection INTEGER, input_tokens INTEGER, output_tokens INTEGER
 );
+CREATE TABLE IF NOT EXISTS usage (     -- каждый запрос к Claude: для бюджета и стоимости
+    ts TEXT, day TEXT, purpose TEXT, model TEXT, prompt_version TEXT,
+    input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL
+);
+CREATE INDEX IF NOT EXISTS usage_day ON usage(day);
+CREATE TABLE IF NOT EXISTS cycles (    -- трейс каждого прогона collect/digest
+    ts TEXT PRIMARY KEY, kind TEXT, duration_sec REAL, data TEXT
+);
 -- дневник: цена, внимание Reddit, записи по дням
 CREATE TABLE IF NOT EXISTS prices (
     date TEXT PRIMARY KEY, open REAL, high REAL, low REAL, close REAL, volume INTEGER
@@ -131,6 +139,8 @@ MIGRATIONS = {
     "score_status": "TEXT",     # ok | unscored (невалидный ответ модели — значения не выдумываются)
     "injection": "INTEGER",     # модель заметила попытку prompt injection
     "prompt_version": "TEXT",   # хэш prompts/scorer.md, которым оценён материал
+    "last_seen": "TEXT",        # когда материал последний раз встретился при сборе
+    "user_label": "TEXT",       # ручная пометка из Telegram (/trash)
 }
 
 
@@ -164,16 +174,49 @@ def upsert_item(conn, item: dict) -> bool:
     Для уже известных обновляет только meta (апвоты растут)."""
     exists = conn.execute("SELECT 1 FROM items WHERE id=?", (item["id"],)).fetchone()
     meta = json.dumps(item.get("meta") or {}, ensure_ascii=False)
+    now = iso()
     if exists:
-        conn.execute("UPDATE items SET meta=? WHERE id=?", (meta, item["id"]))
+        # last_seen — для счётчика «пропущено по кэшу»: материал встретился снова, но уже оценён
+        conn.execute("UPDATE items SET meta=?, last_seen=? WHERE id=?", (meta, now, item["id"]))
         return False
     conn.execute(
-        "INSERT INTO items(id,kind,source,bias,title,url,text,meta,created_utc,first_seen) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO items(id,kind,source,bias,title,url,text,meta,created_utc,first_seen,last_seen) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (item["id"], item["kind"], item["source"], item.get("bias"), item.get("title"), item.get("url"),
-         item.get("text"), meta, item.get("created_utc"), iso()),
+         item.get("text"), meta, item.get("created_utc"), now, now),
     )
     return True
+
+
+# ---------------- токены, стоимость, трейс ----------------
+
+def cost_usd(cfg: dict, model: str, input_tokens: int, output_tokens: int) -> float:
+    price_in, price_out = cfg["budget"]["pricing_usd_per_mtok"].get(model, (0, 0))
+    return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
+
+
+def record_usage(conn, cfg: dict, purpose: str, model: str, prompt_version: str,
+                 input_tokens: int, output_tokens: int) -> None:
+    conn.execute(
+        "INSERT INTO usage(ts,day,purpose,model,prompt_version,input_tokens,output_tokens,cost_usd) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (iso(), datetime.now().date().isoformat(), purpose, model, prompt_version, input_tokens, output_tokens,
+         cost_usd(cfg, model, input_tokens, output_tokens)))
+    conn.commit()
+
+
+def tokens_today(conn) -> int:
+    row = conn.execute("SELECT COALESCE(SUM(input_tokens+output_tokens),0) n FROM usage WHERE day=?",
+                       (datetime.now().date().isoformat(),)).fetchone()
+    return row["n"]
+
+
+def record_cycle(conn, kind: str, duration_sec: float, data: dict) -> None:
+    """Трейс прогона: одна строка в таблицу cycles и одна строка в лог."""
+    conn.execute("INSERT OR REPLACE INTO cycles(ts,kind,duration_sec,data) VALUES(?,?,?,?)",
+                 (iso(), kind, round(duration_sec, 1), json.dumps(data, ensure_ascii=False)))
+    conn.commit()
+    log.info("трейс %s (%.0f с): %s", kind, duration_sec, json.dumps(data, ensure_ascii=False))
 
 
 def alert_already_sent(conn, key: str) -> bool:
