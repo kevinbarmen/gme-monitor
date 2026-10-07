@@ -42,26 +42,39 @@ def reddit_verdict(meta: dict, title: str, text: str, sub_cfg: dict, rcfg: dict)
     return True, "ok"
 
 
-def filter_reddit(conn, cfg: dict) -> None:
+def filter_reddit(conn, cfg: dict) -> dict:
     rcfg = cfg["reddit"]
     subs = {s["name"].lower(): s for s in rcfg["subreddits"]}
     since = iso(now_utc() - timedelta(hours=cfg["scoring"]["lookback_hours"]))
     # перепроверяем всё свежее и ещё не скоренное: апвоты растут между сборами
     rows = conn.execute(
-        "SELECT id,title,text,meta FROM items WHERE kind='reddit' AND scored_at IS NULL AND created_utc>=?",
+        "SELECT id,title,text,meta FROM items WHERE kind='reddit' AND scored_at IS NULL AND created_utc>=? "
+        "ORDER BY first_seen, rowid",
         (since,),
     ).fetchall()
-    passed = 0
+    # кросспосты: тот же заголовок в другом сабе скорить второй раз незачем.
+    # Эталон — уже оценённые посты и те, что прошли раньше в этом же проходе.
+    seen_titles = {norm_title(r["title"]) for r in conn.execute(
+        "SELECT title FROM items WHERE kind='reddit' AND scored_at IS NOT NULL AND created_utc>=?", (since,))}
+    passed = duplicates = 0
     for r in rows:
         meta = json.loads(r["meta"])
         sub_cfg = subs.get(meta.get("sub", "").lower())
         if not sub_cfg:
             continue
         ok, reason = reddit_verdict(meta, r["title"], r["text"], sub_cfg, rcfg)
+        if ok:
+            nt = norm_title(r["title"])
+            if len(nt) >= 15 and nt in seen_titles:
+                ok, reason = False, "duplicate"
+                duplicates += 1
+            else:
+                seen_titles.add(nt)
         _set(conn, r["id"], ok, reason)
         passed += ok
     conn.commit()
-    log.info("фильтр reddit: %d из %d свежих прошли", passed, len(rows))
+    log.info("фильтр reddit: %d из %d свежих прошли, дублей %d", passed, len(rows), duplicates)
+    return {"passed": passed, "checked": len(rows), "duplicates": duplicates}
 
 
 # ---------------- News ----------------
@@ -71,7 +84,7 @@ def norm_title(t: str) -> str:
     return re.sub(r"[^a-z0-9 ]+", " ", t.lower()).strip()
 
 
-def filter_news(conn, cfg: dict) -> None:
+def filter_news(conn, cfg: dict) -> dict:
     ncfg = cfg["news"]
     stop = [s.lower() for s in ncfg["stop_words"]]
     window = iso(now_utc() - timedelta(days=ncfg["dedup_window_days"]))
@@ -84,7 +97,7 @@ def filter_news(conn, cfg: dict) -> None:
     kept = [norm_title(r["title"]) for r in conn.execute(
         "SELECT title FROM items WHERE kind='news' AND passed_filter=1 AND first_seen>=?", (window,))]
 
-    passed = 0
+    passed = duplicates = 0
     for r in new:
         title = r["title"] or ""
         low = title.lower()
@@ -98,17 +111,19 @@ def filter_news(conn, cfg: dict) -> None:
         nt = norm_title(title)
         if any(SequenceMatcher(None, nt, k).ratio() >= ncfg["title_similarity"] for k in kept):
             _set(conn, r["id"], False, "duplicate")
+            duplicates += 1
             continue
         kept.append(nt)
         _set(conn, r["id"], True, "ok")
         passed += 1
     conn.commit()
-    log.info("фильтр news: %d из %d новых прошли", passed, len(new))
+    log.info("фильтр news: %d из %d новых прошли, дублей %d", passed, len(new), duplicates)
+    return {"passed": passed, "checked": len(new), "duplicates": duplicates}
 
 
-def run(conn, cfg: dict) -> None:
-    filter_reddit(conn, cfg)
-    filter_news(conn, cfg)
+def run(conn, cfg: dict) -> dict:
+    counts = {"reddit": filter_reddit(conn, cfg), "news": filter_news(conn, cfg)}
     # SEC не фильтруется: любой новый филинг из списка форм идёт в дайджест
     conn.execute("UPDATE items SET passed_filter=1, filter_reason='sec' WHERE kind='sec' AND passed_filter IS NULL")
     conn.commit()
+    return counts

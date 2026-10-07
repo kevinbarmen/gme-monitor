@@ -16,6 +16,9 @@ def _send(conn, cfg: dict, key: str, text: str) -> None:
         log.info("алерт отправлен: %s", key)
 
 
+notify_once = _send  # служебные уведомления (бюджет, таймаут) — тоже не чаще одного раза по ключу
+
+
 # 1. SEC
 def check_sec(conn, cfg: dict, new_ids: list[str]) -> None:
     alert_forms = set(cfg["sec"]["alert_forms"])

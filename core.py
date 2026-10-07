@@ -110,6 +110,9 @@ CREATE TABLE IF NOT EXISTS scoring_runs (
     n_unscored INTEGER,             -- осталось «не оценён» после повтора
     n_injection INTEGER, input_tokens INTEGER, output_tokens INTEGER
 );
+CREATE TABLE IF NOT EXISTS tg_messages (  -- какое сообщение дайджеста про какой материал (для /trash)
+    message_id INTEGER PRIMARY KEY, item_id TEXT, sent_at TEXT
+);
 CREATE TABLE IF NOT EXISTS usage (     -- каждый запрос к Claude: для бюджета и стоимости
     ts TEXT, day TEXT, purpose TEXT, model TEXT, prompt_version TEXT,
     input_tokens INTEGER, output_tokens INTEGER, cost_usd REAL
@@ -355,32 +358,35 @@ def _split(text: str) -> list[str]:
     return parts
 
 
-def send_telegram(cfg: dict, text: str) -> bool:
-    """Отправляет HTML-сообщение в отдельного GME-бота. Без токена — печатает в консоль."""
+def send_telegram(cfg: dict, text: str, silent: bool = False, reply_to: int | None = None) -> list[int]:
+    """Отправляет HTML-сообщение в отдельного GME-бота. Возвращает id отправленных сообщений
+    (пустой список = не отправлено). Без токена — печатает в консоль и возвращает [0]."""
     token = os.getenv("GME_TG_BOT_TOKEN")
     chat_id = os.getenv("GME_TG_CHAT_ID")
     if not token or not chat_id:
         if cfg["telegram"].get("dry_run_if_no_token", True):
             print("\n===== [TG dry-run] =====\n" + text + "\n========================\n")
-            return True
+            return [0]
         log.error("GME_TG_BOT_TOKEN / GME_TG_CHAT_ID не заданы в .env")
-        return False
+        return []
+    ids: list[int] = []
     ok = True
     for part in _split(text):
+        payload = {"chat_id": chat_id, "text": part, "parse_mode": "HTML", "disable_web_page_preview": True,
+                   "disable_notification": silent}
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
         try:
-            r = requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": part, "parse_mode": "HTML",
-                      "disable_web_page_preview": True},
-                timeout=20,
-            )
+            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=20)
             if r.status_code != 200:
                 log.error("Telegram %s: %s", r.status_code, r.text[:300])
                 ok = False
+            else:
+                ids.append(r.json()["result"]["message_id"])
         except requests.RequestException as e:
             log.error("Telegram недоступен: %s", e)
             ok = False
-    return ok
+    return ids if ok else []
 
 
 # ---------------- beacon / lock ----------------
