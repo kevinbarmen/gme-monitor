@@ -263,6 +263,7 @@ def print_cron(cfg: dict, windows: bool) -> None:
           f">> data/logs/cron.log 2>&1")
     print(f"{int(dm)} {int(dh)} * * * cd {ROOT} && {py} run.py digest >> data/logs/cron.log 2>&1")
     print(f"{int(hm)} {int(hh)} * * * cd {ROOT} && {py} heartbeat.py >> data/logs/cron.log 2>&1")
+    print(f"3-59/5 * * * * cd {ROOT} && {py} run.py tg >> data/logs/cron.log 2>&1")
 
 
 def main() -> int:
