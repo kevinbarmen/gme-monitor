@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
+import context
+import impact
 import journal
 from core import esc, iso, kv_get, kv_set, log, now_utc, send_telegram
 
@@ -63,8 +65,10 @@ def weekly_cost_line(conn, cfg: dict) -> str | None:
     return f"💰 Claude за 7 дней: ${r['c']:.2f} (вход {r['i'] // 1000}k / выход {r['o'] // 1000}k токенов{extra})"
 
 
-def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[tuple[str, str]], list[str]]:
-    """Возвращает (шапка, [(item_id, текст сообщения)], id всех материалов дайджеста)."""
+def build(conn, cfg: dict, scoring_error: str | None,
+          weekly_lines: list[str] | None = None) -> tuple[str, list[tuple[str, str]], list[str]]:
+    """Возвращает (шапка, [(item_id, текст сообщения)], id всех материалов дайджеста).
+    Ничего не пишет в базу — можно вызывать для предпросмотра."""
     dcfg, scfg = cfg["digest"], cfg["scoring"]
     since = iso(now_utc() - timedelta(hours=scfg["lookback_hours"]))
 
@@ -116,10 +120,13 @@ def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[tuple[s
 
     messages: list[tuple[str, str]] = []
     for i, r in enumerate(top, 1):
-        messages.append((r["id"],
-                         f"<b>{i}. [{esc(r['category'])}] {r['score']}/10</b> — {esc(r['title'])}\n"
-                         f"{esc(r['summary'])}\n"
-                         f"{esc(r['source'])} · {_line_bias(r['bias'])}\n{esc(r['url'])}"))
+        text = (f"<b>{i}. [{esc(r['category'])}] {r['score']}/10</b> — {esc(r['title'])}\n"
+                f"{esc(r['summary'])}\n"
+                f"{esc(r['source'])} · {_line_bias(r['bias'])}\n{esc(r['url'])}")
+        block = context.render(r["context"])  # «что это значит»: масштаб и аргументы, только с источниками
+        if block:
+            text += "\n\n" + block
+        messages.append((r["id"], text))
     for i, r in enumerate(fallback, 1):
         m = json.loads(r["meta"])
         extra = f" · {m['ups']} апв." if m.get("ups") is not None else ""
@@ -136,6 +143,7 @@ def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[tuple[s
     cost = weekly_cost_line(conn, cfg)
     if cost:
         head.append(cost)
+    head.extend(weekly_lines or [])
     if messages:
         head.append("<i>Мусор в дайджесте? Ответь на сообщение с постом командой /trash.</i>")
 
@@ -145,7 +153,14 @@ def build(conn, cfg: dict, scoring_error: str | None) -> tuple[str, list[tuple[s
 
 def run(conn, cfg: dict, scoring_error: str | None) -> dict | None:
     """Отправляет дайджест. Возвращает счётчики для трейса или None, если не отправлен."""
-    head, messages, ids = build(conn, cfg, scoring_error)
+    weekly_lines = []
+    try:
+        line = impact.weekly(conn, cfg)  # раз в неделю: оценка важности vs движение цены
+        if line:
+            weekly_lines.append(line)
+    except Exception:  # noqa: BLE001 — eval не должен ронять дайджест
+        log.exception("impact eval: ошибка")
+    head, messages, ids = build(conn, cfg, scoring_error, weekly_lines)
     if not send_telegram(cfg, head):
         log.error("дайджест не отправлен")
         return None

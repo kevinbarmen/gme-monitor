@@ -152,6 +152,76 @@ scoring:
   prompt_file: prompts/scorer.md # промпт — только в prompts/, менять коммитом (см. CLAUDE.md)
   summary_max_chars: 600         # саммари длиннее — ответ невалиден
 
+# ---------------- Контекст «что это значит» (только факты с источником) ----------------
+
+fundamentals:                    # последние значения из отчётности (SEC XBRL company facts)
+  max_age_days: 400              # значение старше — считается устаревшим и в контекст не идёт
+  metrics:                       # kind: instant — на дату; quarter — за квартал; period — за любой период
+    - key: cash
+      label: денежные средства и эквиваленты
+      kind: instant
+      concepts: ["us-gaap:CashAndCashEquivalentsAtCarryingValue"]
+    - key: marketable_securities
+      label: рыночные ценные бумаги (краткосрочные)
+      kind: instant
+      concepts: ["us-gaap:MarketableSecuritiesCurrent"]
+    - key: revenue_q
+      label: выручка за квартал
+      kind: quarter
+      concepts: ["us-gaap:Revenues", "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"]
+    - key: net_income_q
+      label: чистая прибыль за квартал
+      kind: quarter
+      concepts: ["us-gaap:NetIncomeLoss"]
+    - key: debt
+      label: долг
+      kind: instant
+      concepts: ["us-gaap:ConvertibleDebt", "us-gaap:LongTermDebt"]
+    - key: equity
+      label: собственный капитал
+      kind: instant
+      concepts: ["us-gaap:StockholdersEquity"]
+    - key: shares_outstanding
+      label: акций в обращении
+      kind: instant
+      unit: shares
+      concepts: ["dei:EntityCommonStockSharesOutstanding", "us-gaap:CommonStockSharesOutstanding"]
+    - key: buybacks
+      label: выкуп собственных акций (байбек)
+      kind: period
+      concepts: ["us-gaap:PaymentsForRepurchaseOfCommonStock"]
+
+context:
+  enabled: true
+  min_score: 7                   # контекст строится только для материалов с оценкой не ниже
+  max_items: 5
+  effort: medium
+  max_tokens: 8000
+  prompt_file: prompts/context.md
+  text_chars_per_item: 3000
+  argument_max_chars: 500
+  scale_usd_vs: [revenue_q, cash]        # с чем соотносить сумму в долларах
+  scale_shares_vs: [shares_outstanding]  # с чем соотносить число акций
+  neutral_window_days: 7         # материалы нейтральных источников за столько дней — опора для аргументов
+  neutral_max_items: 12
+  filings_window_days: 30        # свежие SEC-филинги — тоже опора
+  # формулировки, которых в выводе быть не может (регулярные выражения, без учёта регистра)
+  banned_patterns:
+    - "(стоит|следует|нужно|надо|пора|рекомендуе\\w*|советуе\\w*)\\s+(по|до)?(купать|купить|продавать|продать|держать)"
+    - "целев\\w+\\s+цен\\w+"
+    - "price\\s+target"
+    - "прогноз\\w*\\s+(цен|курс)\\w*"
+    - "(buy|sell|hold)\\s+rating"
+    - "(вырастет|упад[её]т|взлетит|обвалится)\\s+(до|на)\\s+\\$?\\d"
+
+impact_eval:                     # оценка важности vs реальное движение цены (ранговая корреляция)
+  enabled: true
+  weekday: 0                     # день недели отчёта в дайджесте (0 = понедельник)
+  horizons: [1, 5]               # торговых дней после события
+  min_n: 10                      # меньше дней-наблюдений — «недостаточно данных», без числа
+  warn_rho: 0.1                  # корреляция не выше этого значения считается «около нуля»
+  warn_weeks: 4                  # столько недель подряд — предупреждение «чинить промпт»
+
 budget:
   max_tokens_per_day: 150000     # вход+выход за сутки (дайджест + evals); превышение → скоринг до завтра стоп
   cycle_timeout_sec: 1800        # максимум на один цикл сбора; дальше источники не ждём

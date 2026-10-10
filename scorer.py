@@ -47,10 +47,14 @@ TESTED_PROMPTS = ROOT / "evals" / "tested_prompts.json"
 
 # ---------------- промпт ----------------
 
-def load_prompt(cfg: dict) -> tuple[str, str]:
+def read_prompt(path) -> tuple[str, str]:
     """Текст промпта и его версия — первые 12 символов sha256 от содержимого файла."""
-    raw = resolve_path(cfg["scoring"]["prompt_file"]).read_bytes().replace(b"\r\n", b"\n")
+    raw = path.read_bytes().replace(b"\r\n", b"\n")
     return raw.decode("utf-8"), hashlib.sha256(raw).hexdigest()[:12]
+
+
+def load_prompt(cfg: dict) -> tuple[str, str]:
+    return read_prompt(resolve_path(cfg["scoring"]["prompt_file"]))
 
 
 def tested_key(version: str, model: str) -> str:
@@ -100,12 +104,12 @@ def build_message(items: list[dict], max_chars: int) -> str:
     )
 
 
-def _request(client, scfg: dict, system: str, content: str):
+def _request(client, scfg: dict, system: str, content: str, schema: dict | None = None):
     kwargs = dict(
         model=scfg["model"],
         max_tokens=scfg["max_tokens"],
         system=system,
-        output_config={"effort": scfg["effort"], "format": {"type": "json_schema", "schema": SCHEMA}},
+        output_config={"effort": scfg["effort"], "format": {"type": "json_schema", "schema": schema or SCHEMA}},
         messages=[{"role": "user", "content": content}],
     )
     if scfg.get("use_fallbacks"):

@@ -11,14 +11,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
 import alerts
+import context
 import digest
 import filter as heuristics
+import fundamentals
+import impact
 import journal
 import scorer
 import tg_commands
@@ -91,7 +95,15 @@ def _source_tasks(cfg: dict, conn, http, ctx: dict) -> list[tuple[str, Callable[
         tasks.append(("reddit:r/all", rall_task))
     for feed_cfg in cfg["news"]["feeds"]:
         tasks.append((f"news:{feed_cfg['name']}", news_task(feed_cfg)))
+    def fundamentals_task() -> str:
+        # раз в день; сразу — если только что появился новый 10-Q/10-K
+        new_report = any(
+            json.loads(conn.execute("SELECT meta FROM items WHERE id=?", (i,)).fetchone()["meta"])["form"]
+            in ("10-Q", "10-K", "10-K/A") for i in ctx["new_sec"])
+        return fundamentals.refresh(conn, http, cfg, force=new_report)
+
     tasks.append(("sec", sec_task))
+    tasks.append(("fundamentals", fundamentals_task))
     tasks.append(("price", price_task))
     return tasks
 
@@ -202,6 +214,12 @@ def run_digest(cfg: dict, force: bool) -> None:
             alerts.notify_once(conn, cfg, f"budget:{datetime.now().date().isoformat()}",
                                f"⛔ <b>GME-монитор: {esc(err)}</b>\nСкоринг остановлен до завтра, сбор данных и "
                                f"алерты работают. Лимит — budget.max_tokens_per_day в config.yaml.")
+    context_stats = None
+    if not err:
+        try:
+            context_stats = context.run(conn, cfg)  # масштаб и аргументы для материалов с высокой оценкой
+        except Exception:  # noqa: BLE001 — контекст не должен ронять дайджест
+            log.exception("контекст: ошибка")
     stats = digest.run(conn, cfg, err)
 
     used = conn.execute(
@@ -212,6 +230,7 @@ def run_digest(cfg: dict, force: bool) -> None:
         log.warning("скоринг: %d материалов не вошли в батч (лимит max_items_per_batch) — пойдут в следующий", left)
     record_cycle(conn, "digest", time.monotonic() - started, {
         "scored_now": n_scored, "scoring_error": err, "sent": stats is not None, **(stats or {}),
+        "context": context_stats,
         "left_for_next_batch": left, "tokens_today_before": tokens_before, "tokens_today": tokens_today(conn),
         "digest_input_tokens": used["i"], "digest_output_tokens": used["o"], "digest_cost_usd": round(used["c"], 4),
     })
@@ -271,7 +290,8 @@ def main() -> int:
         if stream:  # под pythonw потоков нет
             stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="GME-монитор")
-    ap.add_argument("command", choices=["collect", "digest", "tg", "status", "print-cron", "journal", "patterns"])
+    ap.add_argument("command", choices=["collect", "digest", "tg", "status", "print-cron", "journal", "patterns",
+                                        "fundamentals", "impact"])
     ap.add_argument("--force", action="store_true", help="digest: отправить повторно за сегодня")
     ap.add_argument("--windows", action="store_true", help="print-cron: команды schtasks для Windows")
     ap.add_argument("--since", help="patterns: начало периода, YYYY-MM-DD (по умолчанию 2021-01-01)")
@@ -295,6 +315,15 @@ def main() -> int:
         return 0
 
     setup_logging(cfg, args.verbose)
+    if args.command == "impact":
+        print(impact.report(connect_db(cfg), cfg))
+        return 0
+    if args.command == "fundamentals":
+        conn = connect_db(cfg)
+        if args.force:
+            print(fundamentals.refresh(conn, Http(cfg, conn), cfg, force=True))
+        print(fundamentals.report(conn))
+        return 0
     if args.command == "tg":  # лёгкая задача раз в несколько минут, без общего лока
         try:
             n = tg_commands.run(connect_db(cfg), cfg)

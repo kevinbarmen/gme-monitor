@@ -110,6 +110,13 @@ CREATE TABLE IF NOT EXISTS scoring_runs (
     n_unscored INTEGER,             -- осталось «не оценён» после повтора
     n_injection INTEGER, input_tokens INTEGER, output_tokens INTEGER
 );
+CREATE TABLE IF NOT EXISTS fundamentals (  -- последние значения из отчётности, с филингом-источником
+    key TEXT PRIMARY KEY, label TEXT, value REAL, unit TEXT, period_start TEXT, period_end TEXT,
+    form TEXT, filed TEXT, accession TEXT, url TEXT, concept TEXT, stale INTEGER, fetched_at TEXT
+);
+CREATE TABLE IF NOT EXISTS impact_eval (   -- еженедельно: корреляция оценки важности и движения цены
+    week_end TEXT PRIMARY KEY, week TEXT, cumulative TEXT, created_at TEXT
+);
 CREATE TABLE IF NOT EXISTS tg_messages (  -- какое сообщение дайджеста про какой материал (для /trash)
     message_id INTEGER PRIMARY KEY, item_id TEXT, sent_at TEXT
 );
@@ -144,6 +151,7 @@ MIGRATIONS = {
     "prompt_version": "TEXT",   # хэш prompts/scorer.md, которым оценён материал
     "last_seen": "TEXT",        # когда материал последний раз встретился при сборе
     "user_label": "TEXT",       # ручная пометка из Telegram (/trash)
+    "context": "TEXT",          # JSON: масштаб и аргументы за/против (блок «что это значит»)
 }
 
 
