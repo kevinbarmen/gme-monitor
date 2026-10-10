@@ -20,12 +20,14 @@ from datetime import datetime, timedelta
 import alerts
 import context
 import digest
+import events
 import filter as heuristics
 import fundamentals
 import impact
 import journal
 import scorer
 import tg_commands
+import weekly
 from core import (ROOT, Http, PermanentError, RunLock, connect_db, esc, health_fail, health_ok, iso, kv_get,
                   kv_set, load_config, log, now_utc, record_cycle, setup_logging, source_log, tokens_today,
                   upsert_item, write_beacon)
@@ -78,6 +80,7 @@ def _source_tasks(cfg: dict, conn, http, ctx: dict) -> list[tuple[str, Callable[
             kv_set(conn, "sec_initialized", iso())
             return f"первый запуск — {len(new)} филингов записаны как база, алертов нет"
         ctx["new_sec"].extend(new)
+        events.classify_pending(conn, http, cfg)  # тип события; Form 4 — разбор XML
         return {"summary": f"{len(filings)} филингов в выборке, новых {len(new)}", "fetched": len(filings), "new": len(new)}
 
     def price_task() -> str:
@@ -186,6 +189,10 @@ def collect(cfg: dict) -> None:
                            f"Не дождались: {esc(', '.join(name for name, _ in pending) or '—')}. "
                            f"Остальные источники обработаны.")
     alerts.check_source_health(conn, cfg)
+    try:
+        events.rebuild(conn, cfg)  # события по типам + цены через 1/5/20 торговых дней
+    except Exception:  # noqa: BLE001 — аналоги не должны ронять сбор
+        log.exception("events: ошибка пересборки")
 
     conn.execute("DELETE FROM reddit_snapshots WHERE ts<?", (iso(now_utc() - timedelta(days=7)),))
     conn.commit()
@@ -205,6 +212,10 @@ def run_digest(cfg: dict, force: bool) -> None:
     if digest.already_sent_today(conn) and not force:
         log.info("дайджест за сегодня уже отправлен (--force чтобы повторить)")
         return
+    w = cfg["weekly"]
+    if w.get("enabled") and datetime.now().weekday() == w["weekday"] and not weekly.is_due(cfg) and not force:
+        log.info("сегодня день недельной сводки, она уйдёт в %s — обычный дайджест пропущен", w["time"])
+        return
     heuristics.run(conn, cfg)
     tokens_before = tokens_today(conn)
     n_scored, err = scorer.run(conn, cfg)
@@ -215,12 +226,20 @@ def run_digest(cfg: dict, force: bool) -> None:
                                f"⛔ <b>GME-монитор: {esc(err)}</b>\nСкоринг остановлен до завтра, сбор данных и "
                                f"алерты работают. Лимит — budget.max_tokens_per_day в config.yaml.")
     context_stats = None
-    if not err:
+    stats = None
+    if weekly.is_due(cfg):
+        # воскресенье: одна недельная сводка вместо дайджеста
         try:
-            context_stats = context.run(conn, cfg)  # масштаб и аргументы для материалов с высокой оценкой
-        except Exception:  # noqa: BLE001 — контекст не должен ронять дайджест
-            log.exception("контекст: ошибка")
-    stats = digest.run(conn, cfg, err)
+            stats = weekly.run(conn, cfg)
+        except Exception:  # noqa: BLE001 — при сбое сводки уходит обычный дайджест
+            log.exception("недельная сводка: ошибка, отправляю обычный дайджест")
+    if stats is None:
+        if not err:
+            try:
+                context_stats = context.run(conn, cfg)  # масштаб и аргументы для материалов с высокой оценкой
+            except Exception:  # noqa: BLE001 — контекст не должен ронять дайджест
+                log.exception("контекст: ошибка")
+        stats = digest.run(conn, cfg, err)
 
     used = conn.execute(
         "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o, COALESCE(SUM(cost_usd),0) c "
@@ -283,6 +302,10 @@ def print_cron(cfg: dict, windows: bool) -> None:
     print(f"{int(dm)} {int(dh)} * * * cd {ROOT} && {py} run.py digest >> data/logs/cron.log 2>&1")
     print(f"{int(hm)} {int(hh)} * * * cd {ROOT} && {py} heartbeat.py >> data/logs/cron.log 2>&1")
     print(f"3-59/5 * * * * cd {ROOT} && {py} run.py tg >> data/logs/cron.log 2>&1")
+    w = cfg["weekly"]
+    if w.get("enabled") and w["time"] != cfg["digest"]["time"]:  # сводка в своё время — отдельный запуск
+        wh, wm = w["time"].split(":")
+        print(f"{int(wm)} {int(wh)} * * {(w['weekday'] + 1) % 7} cd {ROOT} && {py} run.py digest >> data/logs/cron.log 2>&1")
 
 
 def main() -> int:
@@ -291,7 +314,7 @@ def main() -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="GME-монитор")
     ap.add_argument("command", choices=["collect", "digest", "tg", "status", "print-cron", "journal", "patterns",
-                                        "fundamentals", "impact"])
+                                        "fundamentals", "impact", "analogs", "weekly"])
     ap.add_argument("--force", action="store_true", help="digest: отправить повторно за сегодня")
     ap.add_argument("--windows", action="store_true", help="print-cron: команды schtasks для Windows")
     ap.add_argument("--since", help="patterns: начало периода, YYYY-MM-DD (по умолчанию 2021-01-01)")
@@ -315,6 +338,17 @@ def main() -> int:
         return 0
 
     setup_logging(cfg, args.verbose)
+    if args.command == "weekly":  # предпросмотр недельной сводки (тратит токены, ничего не отправляет)
+        print(weekly.run(connect_db(cfg), cfg, preview=True)["text"])
+        return 0
+    if args.command == "analogs":
+        conn = connect_db(cfg)
+        if args.force:  # разобрать все оставшиеся Form 4 сразу
+            n = events.classify_pending(conn, Http(cfg, conn), cfg, limit=10_000)
+            print(f"классифицировано филингов: {n}")
+        events.rebuild(conn, cfg)
+        print(events.report(conn, cfg))
+        return 0
     if args.command == "impact":
         print(impact.report(connect_db(cfg), cfg))
         return 0

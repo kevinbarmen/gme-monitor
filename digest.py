@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta
 
 import context
+import events
 import impact
 import journal
 from core import esc, iso, kv_get, kv_set, log, now_utc, send_telegram
@@ -111,11 +112,20 @@ def build(conn, cfg: dict, scoring_error: str | None,
 
     if filings:
         lines = ["🏛 <b>Новые SEC-филинги</b>"]
+        seen_types: dict[str, str] = {}
         for f in filings:
             m = json.loads(f["meta"])
             form = "Form 4" if m["form"] == "4" else m["form"]
-            lines.append(f"• <b>{esc(form)}</b> ({esc(m['filing_date'])}) — {esc(m['meaning'])}\n"
+            # у Form 4 суть берётся из самого филинга: кто, покупка или продажа, сколько и на какую сумму
+            meaning = events.describe_form4(json.loads(f["details"])) if f["details"] else m["meaning"]
+            lines.append(f"• <b>{esc(form)}</b> ({esc(m['filing_date'])}) — {esc(meaning)}\n"
                          f"  {esc(f['url'])}")
+            if f["event_type"]:
+                seen_types.setdefault(f["event_type"], events.trading_day_of(conn, m["filing_date"]))
+        for event_type, day in seen_types.items():  # одна строка аналогов на тип события
+            line = events.analog_line(conn, cfg, event_type, exclude_day=day)
+            if line:
+                lines.append(esc(line))
         head.append("\n".join(lines))
 
     messages: list[tuple[str, str]] = []
@@ -126,6 +136,10 @@ def build(conn, cfg: dict, scoring_error: str | None,
         block = context.render(r["context"])  # «что это значит»: масштаб и аргументы, только с источниками
         if block:
             text += "\n\n" + block
+        analog = events.analog_line(conn, cfg, r["event_type"],
+                                    exclude_day=events.trading_day_of(conn, r["created_utc"]))
+        if analog:  # как цена вела себя после событий того же типа — описательно, не прогноз
+            text += ("\n" if block else "\n\n") + esc(analog)
         messages.append((r["id"], text))
     for i, r in enumerate(fallback, 1):
         m = json.loads(r["meta"])

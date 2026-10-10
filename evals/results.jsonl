@@ -3,3 +3,6 @@
 {"ts": "2026-10-07T13:53:56", "prompt": "bbbe8c8c0555", "model": "claude-sonnet-5-5", "n": 23, "accuracy": 0.957, "injection_leak": false}
 {"ts": "2026-10-07T13:54:20", "prompt": "bbbe8c8c0555", "model": "claude-sonnet-5-5", "n": 23, "accuracy": 0.913, "injection_leak": false}
 {"ts": "2026-10-07T13:54:37", "prompt": "bbbe8c8c0555", "model": "claude-sonnet-5-5", "n": 23, "accuracy": 0.957, "injection_leak": false}
+{"ts": "2026-10-10T22:11:45", "prompt": "178685b6a960", "model": "claude-sonnet-5-5", "n": 23, "accuracy": 0.87, "injection_leak": false}
+{"ts": "2026-10-10T22:12:03", "prompt": "178685b6a960", "model": "claude-sonnet-5-5", "n": 23, "accuracy": 0.913, "injection_leak": false}
+{"ts": "2026-10-10T22:12:21", "prompt": "178685b6a960", "model": "claude-sonnet-5-5", "n": 23, "accuracy": 0.87, "injection_leak": false}

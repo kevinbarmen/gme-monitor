@@ -54,7 +54,7 @@ class FakeClient:
     def create(self, **kw):
         self.calls += 1
         ids = [line.split('"')[1] for line in kw["messages"][0]["content"].splitlines() if line.startswith("<item id=")]
-        items = [{"id": i, "injection_suspected": False, "score": 7, "category": "событие", "keep": True,
+        items = [{"id": i, "injection_suspected": False, "score": 7, "category": "событие", "keep": True, "event_type": "other",
                   "summary_ru": "Саммари."} for i in ids]
         return types.SimpleNamespace(
             stop_reason="end_turn", usage=types.SimpleNamespace(input_tokens=1000, output_tokens=200),

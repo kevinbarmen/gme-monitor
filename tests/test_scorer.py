@@ -24,7 +24,7 @@ ITEMS = [{"id": f"reddit:{i}", "kind": "reddit", "source": "r/GME", "bias": "б�
 
 
 def good(i: str, **over) -> dict:
-    return {"id": i, "injection_suspected": False, "score": 7, "category": "событие", "keep": True,
+    return {"id": i, "injection_suspected": False, "score": 7, "category": "событие", "keep": True, "event_type": "other",
             "summary_ru": "Саммари.", **over}
 
 

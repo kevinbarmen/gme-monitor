@@ -5,6 +5,7 @@ import html
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -114,6 +115,11 @@ CREATE TABLE IF NOT EXISTS fundamentals (  -- последние значени�
     key TEXT PRIMARY KEY, label TEXT, value REAL, unit TEXT, period_start TEXT, period_end TEXT,
     form TEXT, filed TEXT, accession TEXT, url TEXT, concept TEXT, stale INTEGER, fetched_at TEXT
 );
+CREATE TABLE IF NOT EXISTS events (        -- события по типам с ценами: в день события и через N торг. дней
+    type TEXT, trading_day TEXT, source TEXT, item_id TEXT, close_0 REAL,
+    closes_after TEXT,              -- JSON {"1": close, "5": close, "20": close}; null — день ещё не наступил
+    updated_at TEXT, PRIMARY KEY (type, trading_day)
+);
 CREATE TABLE IF NOT EXISTS impact_eval (   -- еженедельно: корреляция оценки важности и движения цены
     week_end TEXT PRIMARY KEY, week TEXT, cumulative TEXT, created_at TEXT
 );
@@ -152,6 +158,8 @@ MIGRATIONS = {
     "last_seen": "TEXT",        # когда материал последний раз встретился при сборе
     "user_label": "TEXT",       # ручная пометка из Telegram (/trash)
     "context": "TEXT",          # JSON: масштаб и аргументы за/против (блок «что это значит»)
+    "event_type": "TEXT",       # тип события из analogs.event_types ('-' — не отслеживается)
+    "details": "TEXT",          # JSON: разобранная суть филинга (Form 4: кто, сколько, на какую сумму)
 }
 
 
@@ -348,19 +356,33 @@ def esc(s: str | None) -> str:
     return html.escape(s or "", quote=False)
 
 
+def _visible_len(s: str) -> int:
+    """Длина текста так, как её считает Telegram: без HTML-тегов (длинные ссылки в href не в счёт)."""
+    return len(re.sub(r"<[^>]+>", "", s))
+
+
 def _split(text: str) -> list[str]:
-    parts, cur = [], ""
+    """Делит сообщение на части по лимиту Telegram. Режет только по границам абзацев и строк,
+    чтобы не разорвать HTML-тег; строку без тегов длиннее лимита режет по символам."""
+    units: list[tuple[str, str]] = []  # (разделитель перед куском, кусок)
     for block in text.split("\n\n"):
-        piece = (cur + "\n\n" + block) if cur else block
-        if len(piece) <= TG_LIMIT:
-            cur = piece
+        if _visible_len(block) <= TG_LIMIT:
+            units.append(("\n\n", block))
             continue
-        if cur:
+        for i, line in enumerate(block.split("\n")):
+            sep = "\n\n" if i == 0 else "\n"
+            while "<" not in line and len(line) > TG_LIMIT:
+                units.append((sep, line[:TG_LIMIT]))
+                line, sep = line[TG_LIMIT:], "\n"
+            units.append((sep, line))
+    parts, cur = [], ""
+    for sep, unit in units:
+        piece = cur + sep + unit if cur else unit
+        if _visible_len(piece) <= TG_LIMIT:
+            cur = piece
+        else:
             parts.append(cur)
-        while len(block) > TG_LIMIT:  # на случай одного огромного блока
-            parts.append(block[:TG_LIMIT])
-            block = block[TG_LIMIT:]
-        cur = block
+            cur = unit
     if cur:
         parts.append(cur)
     return parts

@@ -16,6 +16,8 @@ http:
       min_interval_sec: 7        # RSS/JSON без авторизации: ~1 запрос в несколько секунд
     oauth.reddit.com:
       min_interval_sec: 2
+    www.sec.gov:                 # архив филингов (Form 4 XML); лимит SEC — 10 запросов/с
+      min_interval_sec: 0.3
     query1.finance.yahoo.com:    # Yahoo отвечает 429 на не-браузерный UA
       user_agent: &browser "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36"
     feeds.finance.yahoo.com:
@@ -214,9 +216,66 @@ context:
     - "(buy|sell|hold)\\s+rating"
     - "(вырастет|упад[её]т|взлетит|обвалится)\\s+(до|на)\\s+\\$?\\d"
 
+analogs:                         # исторические аналоги: как цена вела себя после событий того же типа
+  enabled: true
+  since: "2023-01-01"            # события раньше в статистику не берутся (эпоха squeeze искажает разброс)
+  horizons: [1, 5, 20]           # через сколько торговых дней хранить цену закрытия
+  digest_horizon: 5              # какой горизонт показывать в дайджесте
+  min_n: 5                       # меньше случаев — «недостаточно данных», без процентов
+  form4_fetch_per_cycle: 40      # сколько Form 4 разбирать за один цикл сбора
+  event_types:                   # фиксированный список типов: ключ → подпись
+    earnings: отчётность (8-K с результатами)
+    periodic_report: квартальный/годовой отчёт (10-Q/10-K)
+    management_change: изменения в руководстве
+    capital_raise: привлечение капитала или долга
+    mna: сделка слияния/поглощения
+    material_agreement: существенный договор
+    shareholder_vote: итоги собрания акционеров
+    insider_buy: покупка инсайдера на рынке (Form 4)
+    insider_sell: продажа инсайдера на рынке (Form 4)
+    insider_other: операция инсайдера без сделки на рынке
+    major_holder: изменение доли крупного акционера (13D/G)
+    buyback: выкуп собственных акций
+    business: операционные новости бизнеса
+    press: крупная пресса или интервью руководства
+    other: прочее
+  no_stats_types: [insider_other, other]   # по этим типам аналоги не показываются
+  sec_8k_items:                  # item 8-K → тип события; порядок = приоритет
+    "2.02": earnings
+    "5.02": management_change
+    "3.02": capital_raise
+    "2.03": capital_raise
+    "2.01": mna
+    "1.01": material_agreement
+    "5.07": shareholder_vote
+  major_holder_forms: [SC 13D, SC 13D/A, SC 13G]
+
+weekly:                          # воскресная сводка — одно сообщение вместо дайджеста
+  enabled: true
+  weekday: 6                     # 6 = воскресенье
+  time: "09:50"                  # если отличается от digest.time — нужен отдельный запуск (см. print-cron)
+  prompt_file: prompts/weekly.md
+  effort: medium
+  max_tokens: 8000
+  top_items: 12                  # сколько лучших материалов недели передавать модели
+  history_weeks: 3               # сколько прошлых недель смотреть в поиске «продолжений»
+  text_max_chars: 400            # лимит длины одного пункта сводки
+
+calendar:                        # ближайшие события для воскресной сводки
+  horizon_days: 60
+  manual:                        # подтверждённые даты вносятся вручную: {date, title, source}
+    - date: "2026-10-30"
+      title: истечение публичных варрантов GameStop (17:00 по Нью-Йорку)
+      source: "сообщение компании, по материалам дайджеста"
+  estimates:                     # ориентиры по датам прошлого года (не подтверждённые даты)
+    - event_type: earnings
+      title: квартальная отчётность
+    - event_type: shareholder_vote
+      title: годовое собрание акционеров
+
 impact_eval:                     # оценка важности vs реальное движение цены (ранговая корреляция)
   enabled: true
-  weekday: 0                     # день недели отчёта в дайджесте (0 = понедельник)
+  weekday: 6                     # день недели отчёта (6 = воскресенье, вместе с недельной сводкой)
   horizons: [1, 5]               # торговых дней после события
   min_n: 10                      # меньше дней-наблюдений — «недостаточно данных», без числа
   warn_rho: 0.1                  # корреляция не выше этого значения считается «около нуля»
@@ -230,7 +289,7 @@ budget:
     claude-sonnet-5-5: [2, 10]
     claude-opus-5-5: [4, 20]
     claude-haiku-4-5: [1, 5]
-  weekly_cost_weekday: 0         # день недели строки «расходы за 7 дней» в дайджесте (0 = понедельник)
+  weekly_cost_weekday: 6         # день недели строки «расходы за 7 дней» (6 = воскресенье, в недельной сводке)
 
 evals:
   target_accuracy: 0.8           # цель совпадения с ручной разметкой

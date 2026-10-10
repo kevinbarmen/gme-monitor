@@ -355,6 +355,7 @@ def run(conn, cfg: dict) -> dict | None:
 # ---------------- рендер в дайджест ----------------
 
 def _links(refs: list[dict]) -> str:
+    refs = refs[:3]  # не больше трёх ссылок на аргумент
     return "; ".join(f'<a href="{esc(r["url"])}">{esc(r["label"])}</a>' for r in refs)
 
 
